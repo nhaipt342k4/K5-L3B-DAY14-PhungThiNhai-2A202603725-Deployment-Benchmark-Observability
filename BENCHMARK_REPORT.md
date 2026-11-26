@@ -107,14 +107,14 @@ jobs:
 
 ## 4. Observability stack (production)
 
-> TODO (CP8): bật stack `docker compose -p k5-day14-observability up -d --build --scale agent=1`.
+Stack bật bằng `docker compose -p k5-day14-observability up -d --build --scale agent=1` (sau đó scale 3). Lưu ý: Dockerfile có sẵn của `production/` làm agent crash (`ModuleNotFoundError: No module named 'uvicorn'`) vì user `agent` có HOME `/app` nên Python tìm user site ở `/app/.local`, trong khi packages được copy vào `/home/agent/.local`; đã sửa bằng `ENV PYTHONUSERBASE=/home/agent/.local`. Lượt benchmark chạy trước khi sửa (100% 502) đã bị bỏ và chạy lại.
 
 ### 4.1 Screenshot
 
-- [ ] Dashboard Grafana khi đang có tải (thấy rõ Golden Signals) — `screenshots/grafana-dashboard.png`
-- [ ] Một trace chậm trong Jaeger (thấy span nào chiếm thời gian) — `screenshots/jaeger-slow-trace.png`
-- [ ] Một trace lỗi trong Jaeger (có event `exception`) — `screenshots/jaeger-error-trace.png`
-- [ ] Trang Alerts của Prometheus với ít nhất 2 alert đang **firing** — `screenshots/prometheus-alert-firing.png`
+- [x] Dashboard Grafana khi đang có tải (thấy rõ Golden Signals) — [`screenshots/grafana-dashboard.png`](screenshots/grafana-dashboard.png): 15.2 req/s, error rate 20.19%, p95 1.89 s, 3 instance (đang bật A+B; biểu đồ latency thấy rõ bước nhảy lúc 16:43)
+- [x] Một trace chậm trong Jaeger (thấy span nào chiếm thời gian) — [`screenshots/jaeger-slow-trace.png`](screenshots/jaeger-slow-trace.png): `ec65383…`, 1.7 s, span `chat mock-llm-small` chiếm gần toàn bộ
+- [x] Một trace lỗi trong Jaeger (có event `exception`) — [`screenshots/jaeger-error-trace.png`](screenshots/jaeger-error-trace.png): `30ba767…`, `POST /ask` 503, span lỗi đánh dấu ❗; event `exception` xem mục 4.3
+- [x] Trang Alerts của Prometheus với ít nhất 2 alert đang **firing** — [`screenshots/prometheus-alert-firing.png`](screenshots/prometheus-alert-firing.png): `AgentHighErrorRate` và `AgentHighLatencyP95` cùng FIRING
 
 ### Exercise 7.4 — đọc dashboard (Locust 30 user, 3 instance, cấu hình mặc định)
 
@@ -133,14 +133,14 @@ Cách đo: Locust headless 30 user chạy nền suốt thí nghiệm, 3 instance
 |---|---|---|---|---|
 | A | `MOCK_ERROR_RATE=0.2` | `AgentHighErrorRate` | **90 s** (đổi 16:43:37 → firing 16:45:07) | Golden Signals → **Error rate** (0.97% → 20.6%); req/s theo status (5xx) |
 | B | `MOCK_SLOW_RATE=0.3` | `AgentHighLatencyP95` | **145 s** (16:43:37 → 16:46:02) | **Latency p50/p95/p99/avg**: p95 292.6 ms → 1898 ms, avg chỉ 230 → 575 ms |
-| C | `LLM_MODEL=mock-llm-large` | `LLMCostBurnRateHigh` | TODO — đo lại (xem ghi chú) | **Cost USD/giờ** |
+| C | `LLM_MODEL=mock-llm-large` | `LLMCostBurnRateHigh` | **175 s** (đổi 17:10:49 → pending 17:11:44 → firing 17:13:44); đo lại với 10 user, xem ghi chú | **Cost USD/giờ**: $0.80 → $7.01 lúc firing (vẫn đang tăng); latency p95 297 → 695 ms |
 | D | `docker pause k5-day14-observability-agent-1` | `AgentInstanceDown` (`172.18.0.5:8000`) | **40 s** (16:38:33 → 16:39:13) | **Instances up** 3 → 2; panel Error rate vẫn **xanh** (0.75%) |
 | E | `AGENT_VERSION=v1` | **Không có** (theo dõi 3 phút 12 s) | — | **Tokens/s** input 1472 → 683, **Cost/giờ** $5.38 → $1.14, retrieval hit ratio mất, bảng version đổi sang v1; p95 còn giảm (293 → 198 ms) |
 
 Ghi chú:
 - **A cần ~90 s** = `rate(...[1m])` cần thời gian để tỉ lệ lỗi trong cửa sổ 1 phút vượt 5% + `for: 1m` ở trạng thái pending. **B cần ~145 s** vì `for: 2m` dài hơn. **D chỉ 40 s** = `for: 30s` + chu kỳ scrape 5 s.
 - **D:** `docker pause` (không phải `stop`) để container vẫn còn trong DNS → Prometheus thấy target nhưng scrape fail → `up == 0`. Request Nginx gửi vào instance bị pause chờ tới timeout (504 ở Nginx) — agent chưa từng xử lý chúng nên **metric của agent không đếm**, panel Error rate vẫn xanh. Cần giám sát thêm ở tầng load balancer hoặc synthetic check từ bên ngoài.
-- **C:** ở trạng thái mặc định (model small, 30 user ≈ 18.8 req/s) cost đã là **$5.38/giờ > ngưỡng $2/giờ** (cửa sổ `rate[5m]` còn chứa cả lượt benchmark 100 user trước đó), nên `LLMCostBurnRateHigh` **đã firing từ trước** khi đổi model — không đo được "thời gian tới firing" từ lần chạy này.
+- **C:** lần chạy đầu (30 user ≈ 18.8 req/s, model small) cost đã là **$5.38/giờ > ngưỡng $2/giờ** (cửa sổ `rate[5m]` còn chứa cả lượt benchmark 100 user trước đó), nên `LLMCostBurnRateHigh` **đã firing từ trước** khi đổi model — kết quả đó bị bỏ. **Đo lại** với Locust 10 user (6.05 req/s): chờ tới khi cost ổn định ở **$0.80/giờ**, alert inactive, rồi đổi sang `mock-llm-large`. Alert sang pending sau **55 s** (cửa sổ `rate[5m]` mới tích đủ chi phí model lớn để vượt $2/giờ) và firing sau **175 s** (= 55 s + `for: 2m`). Lúc firing cost đã $7.01/giờ (×8.8) và vẫn đang tăng vì `rate[5m]` còn trộn dữ liệu model nhỏ; model lớn đắt hơn ~16 lần và chậm hơn ~2.5 lần nên p95 cũng tăng gấp đôi. Bài học: ngưỡng cost theo burn rate tuyệt đối phụ thuộc lưu lượng — ở 30 user model nhỏ đã vượt $2/giờ, nên trong production nên alert theo **chi phí / request** hoặc theo % budget ngày thay vì một ngưỡng cố định.
 
 **Thí nghiệm E không làm alert nào firing. Bạn sẽ phát hiện loại sự cố này trong production bằng cách nào?**
 
